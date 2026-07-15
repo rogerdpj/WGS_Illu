@@ -26,6 +26,5 @@ work/
 .nextflow*
 data/out*
 .nfs*
-kraken_db/*
-DVT_trace.txt
+db_16GB/*
 bakta_db/db-light/
