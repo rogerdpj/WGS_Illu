@@ -15,10 +15,10 @@ DB_URL="${DB_URL:-}"                      # opcional: URL directa para override 
 DB_URL_CHECKSUM="${DB_URL_CHECKSUM:-}"    # opcional: URL a .sha256 o .md5
 
 # URLs FIJAS (ajusta cuando haya nuevas releases)
-DB_URL_FULL_DEFAULT="https://genome-idx.s3.amazonaws.com/kraken/k2_standard_20250714.tar.gz"
-DB_URL_16_DEFAULT="https://genome-idx.s3.amazonaws.com/kraken/k2_standard_16_GB_20250714.tar.gz"
+DB_URL_FULL_DEFAULT="https://genome-idx.s3.amazonaws.com/kraken/k2_standard_20260226.tar.gz"
+DB_URL_16_DEFAULT="https://genome-idx.s3.amazonaws.com/kraken/k2_standard_16_GB_20260226.tar.gz"
 
-export KRAKEN2_DEFAULT_DB="$DB_DIR"
+export KRAKEN2_DEFAULT_DB="$DB_DIR/$DB_SELECT"
 
 # Descarga reanudable en el volumen (no en /tmp) + lock anti-carreras
 CACHE_DIR="${CACHE_DIR:-$DB_DIR/.cache}"
@@ -29,8 +29,11 @@ LOCK_DIR="$DB_DIR/.download.lock"
 # Helpers
 # ==========================
 have_db () {
-  [[ -f "$DB_DIR/hash.k2d" && -f "$DB_DIR/opts.k2d" && -f "$DB_DIR/taxo.k2d" ]]
+  [[ -f "$DB_DIR/$DB_SELECT/hash.k2d" &&
+     -f "$DB_DIR/$DB_SELECT/opts.k2d" &&
+     -f "$DB_DIR/$DB_SELECT/taxo.k2d" ]]
 }
+
 
 download_with_resume () {
   local url="$1"
@@ -71,10 +74,10 @@ detect_strip_components () {
 
 verify_db () {
   for f in hash.k2d opts.k2d taxo.k2d; do
-    if [[ ! -f "$DB_DIR/$f" ]]; then
-      echo "ERROR: falta $f en $DB_DIR"
-      echo "Contenido de $DB_DIR:"
-      ls -la "$DB_DIR"
+    if [[ ! -f "$DB_DIR/$DB_SELECT/$f" ]]; then
+      echo "ERROR: falta $f en $DB_DIR/$DB_SELECT"
+      echo "Contenido de $DB_DIR/$DB_SELECT:"
+      ls -la "$DB_DIR/$DB_SELECT"
       exit 9
     fi
   done
@@ -82,17 +85,42 @@ verify_db () {
 
 extract_db () {
   local tgz="$1"
-  echo "Extrayendo en $DB_DIR ..."
-  mkdir -p "$DB_DIR"
-  local strip
-  strip="$(detect_strip_components "$tgz")"
-  if [[ "$strip" -eq 1 ]]; then
-    tar -C "$DB_DIR" --strip-components=1 -xzf "$tgz"
+  echo "Extrayendo en $DB_DIR/$DB_SELECT ..."
+  mkdir -p "$DB_DIR/$DB_SELECT"
+
+  local tmpdir
+  tmpdir="$(mktemp -d "$DB_DIR/.extract_tmp.XXXXXX")"
+  tar -C "$tmpdir" -xzf "$tgz"
+
+  echo "DEBUG: tar preview (first 10 entries):"
+  tar -tzf "$tgz" | head -n 10 || true
+
+  local extracted_root
+  extracted_root="$(find "$tmpdir" -mindepth 1 -maxdepth 1 | head -n 1 || true)"
+
+  if [[ -n "$extracted_root" && -d "$extracted_root" && -f "$extracted_root/hash.k2d" ]]; then
+    echo "Detected top-level directory '$(basename "$extracted_root")' in archive"
+    shopt -s dotglob nullglob
+    mv "$extracted_root"/* "$DB_DIR/$DB_SELECT/" 2>/dev/null || true
+    shopt -u dotglob
   else
-    tar -C "$DB_DIR" -xzf "$tgz"
+    echo "No single top-level DB directory detected, moving extracted contents directly"
+    shopt -s dotglob nullglob
+    mv "$tmpdir"/* "$DB_DIR/$DB_SELECT/" 2>/dev/null || true
+    shopt -u dotglob
   fi
+
+  rm -rf "$tmpdir"
+
+  if [ ! -f "$DB_DIR/$DB_SELECT/hash.k2d" ]; then
+    echo "ERROR: DB no encontrada en $DB_DIR/$DB_SELECT tras extraer"
+    echo "Contenido de $DB_DIR/$DB_SELECT:"
+    ls -la "$DB_DIR/$DB_SELECT" || true
+    exit 10
+  fi
+
   verify_db
-  echo "DB lista en: $DB_DIR"
+  echo "DB lista en: $DB_DIR/$DB_SELECT"
 }
 
 # Selección de fuente según DB_SELECT / DB_URL
