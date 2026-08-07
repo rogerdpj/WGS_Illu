@@ -1,20 +1,24 @@
 //Quality analisis 
-process FASTQC_QUALITY {
-    tag "FASTQC"
+process FASTQC {
+    tag "QC: ${reads.name}"
+    label 'env_fastqc'
 
-    container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
-        "docker://${params.short_wgs.docker}" :
-        params.short_wgs.docker }"
+    publishDir "${params.outdir}/versions", mode: 'copy', pattern: "*.version.txt"
 
     input:
     path (reads)
 
     output:
-    path ("*.html"), emit:qc_html
+    path ("*.html"), emit: qc_html
     path ("*.zip"), emit: qc_zip
+    path "${task.process}.version.txt", emit: versions
 
     script:
     """
-    fastqc ${reads}
+    echo "fastQC\t\$(fastqc --version 2>&1 | grep -oE '[0-9]+\\.[0-9]+(\\.[0-9]+)?' | head -n 1)" > ${task.process}.version.txt
+
+    fastqc \
+        --threads ${task.cpus} \
+        ${reads}
     """
 }

@@ -1,21 +1,27 @@
 process BUSCO {
-    tag "GENOME COMPLETENESS ${sample_id}"
+    tag "BUSCO: ${sample_id}"
+    label 'env_busco'
 
-    container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
-        "docker://${params.busco.docker}" :
-        params.busco.docker }"
-    
-    publishDir "${params.outdir}/1-QC/genomeQC/BUSCO", mode: "copy" 
+    publishDir "${params.outdir}/1-QC/genome_QC/1-BUSCO", mode: "copy", pattern: "${sample_id}_busco*"
+    publishDir "${params.outdir}/versions", mode: "copy", pattern: "*.version.txt"
 
     input:
     tuple val(sample_id), path(assemble)
 
     output:
-    tuple val(sample_id), path("${sample_id}_busco")
+    tuple val(sample_id), path("${sample_id}_busco"), emit: results
+    path "${task.process}.version.txt", emit: versions
 
     script:
 
     """
-    busco -i ${assemble} -m genome -l bacteria -o ${sample_id}_busco
+    echo -e "busco\t\$(busco --version 2>&1 | awk '{print \$2}')" > ${task.process}.version.txt
+
+    busco \
+        -i ${assemble} \
+        -m genome \
+        -l ${params.busco_lineage} \
+        -o ${sample_id}_busco \
+        -c ${task.cpus} 
     """
 }

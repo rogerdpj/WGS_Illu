@@ -1,46 +1,34 @@
 process BAKTA {
-    tag "BAKTA annotation for ${sample_id}"
-    
-    container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
-        "docker://${params.bakta.docker}" :
-        params.bakta.docker }"
+    tag "BAKTA annotation: ${sample_id}"
+    label 'env_bakta'
 
-    publishDir "${params.outdir}/2-Assembly/Annotations", mode: 'copy', saveAs: { filename ->
-        if (filename.endsWith(".gff3")) {
-            return "bakta/${sample_id}/${sample_id}.gff3"
-        } else if (filename.endsWith(".faa")) {
-            return "bakta/${sample_id}/${sample_id}.faa"
-        } else if (filename.endsWith(".fna")) {
-            return "bakta/${sample_id}/${sample_id}.fna"
-        } else if (filename.endsWith(".gbff")) {
-            return "bakta/${sample_id}/${sample_id}.gbff"
-        } else if (filename.endsWith(".txt")) {
-            return "bakta/${sample_id}/${sample_id}.txt"
-        } else if (filename.endsWith(".json")) {
-            return "bakta/${sample_id}/${sample_id}.json"
-        } else {
-            return null
-        }
-    }
+    publishDir "${params.outdir}/2-Assembly/2-Annotations", mode: 'copy', pattern: "annotations_${sample_id}/*"
+    publishDir "${params.outdir}/versions", mode: 'copy', pattern: "*.version.txt"
 
     input:
     tuple val(sample_id), path(assembly_file)
 
     output:
-    path "annotations_${sample_id}/${sample_id}.gff3", emit: bakta_gff3
-    path "annotations_${sample_id}/${sample_id}.faa", emit: bakta_faa
-    path "annotations_${sample_id}/${sample_id}.ffn", emit: bakta_ffn
-    path "annotations_${sample_id}/${sample_id}.gbff", emit: bakta_gbff
-    path "annotations_${sample_id}/${sample_id}.txt", emit: bakta_txt
-    path "annotations_${sample_id}/${sample_id}.json", emit: bakta_json
+    path "annotations_${sample_id}/*", emit: bakta_results
     tuple val(sample_id), path("annotations_${sample_id}/${sample_id}.gff3"), path("annotations_${sample_id}/${sample_id}.fna"), emit: conv_gff
-
+    path "${task.process}.version.txt", emit: versions
     
     script:
 
     """
-    amrfinder_update --force_update --database /data/db-light/amrfinderplus-db
+    set -euo pipefail
 
-    bakta --db /data/db-light --threads ${task.cpus} --keep-contig-headers --output annotations_${sample_id} ${assembly_file}
+    export MPLCONFIGDIR="\$PWD/.mplconfig"
+    mkdir -p "\$MPLCONFIGDIR"
+    
+    echo -e "bakta\t\$(bakta --version 2>&1 | grep -i bakta | head -n 1 | awk '{print \$2}')" > ${task.process}.version.txt
+
+    bakta \
+        --threads ${task.cpus} \
+        --keep-contig-headers \
+        --skip-sorf \
+        --prefix ${sample_id} \
+        --output annotations_${sample_id} \
+        ${assembly_file}
     """
 }

@@ -15,30 +15,32 @@ Configuration environment:
 //Call all the sub-work
 include { PREPARE_KRAKEN_DB                                   }     from '../modules/kraken/db_set'
 
-include { FASTQC_QUALITY as FASTQC_QUALITY_ORIGINAL           }     from '../modules/qc/fastqc/main'
+include { FASTQC as FASTQC_PRE                                }     from '../modules/qc/fastqc/main'
 include { TRIMMING                                            }     from '../modules/trimming/main'
-include { FASTQC_QUALITY as FASTQC_QUALITY_FINAL              }     from '../modules/qc/fastqc/main'
+include { FASTQC as FASTQC_POST                               }     from '../modules/qc/fastqc/main'
 include { KRAKEN;SEQTK_PRUNE                                  }     from '../modules/kraken/main'
 include { MULTIQC                                             }     from '../modules/qc/multiqc/main'
 
 include { ASSEMBLY                                            }     from '../modules/assembly/main'
-include { FILTER_CONTIGS                                      }     from '../modules/qc/polish/filter'
-include { ALIGMENT_PILON;PILON_POLISH                         }     from '../modules/qc/polish/main'
+include { FILTER                                              }     from '../modules/qc/filter/main'
+include { ALIGNMENT_PILON;PILON_POLISH                        }     from '../modules/qc/polish/main'
 
-include { PROKKA                                              }     from '../modules/anotations/prokka/main_2'
 include { BAKTA                                               }     from '../modules/anotations/bakta/main'
 
 include { QUAST                                               }     from '../modules/qc/quast/main'
 include { BUSCO                                               }     from '../modules/qc/busco/main'
-include { MULTIQC_2 as POST_MULTIQC                           }     from '../modules/qc/multiqc/main_2' 
+include { MOSDEPTH                                            }     from '../modules/qc/mosdepth/main'
+include { GENOME_MULTIQC                                      }     from '../modules/qc/multiqc/main_2' 
 
-include { AMR as POST_ANALYSIS_ABRICATE                       }     from '../modules/AMR/abricate/main'
-include { AMR_2 as POST_ANALYSIS_AMRFINDER                    }     from '../modules/AMR/AMRFinder/main'
-
-include { ARIBA                                               }     from '../modules/mlst/main'
 include { MLST                                                }     from '../modules/mlst/main_2'
+include { ARIBA                                               }     from '../modules/mlst/main'
+include { ABRICATE                                            }     from '../modules/AMR/abricate/main'
+include { AMRFINDER                                           }     from '../modules/AMR/amrfinder/main'
+
 include { MRSA                                                }     from '../modules/mrsa/main'
 include { SCCMEC                                              }     from '../modules/mrsa/main'
+
+include { COLLECT                                             }     from '../modules/collect/main'
 
 //MAIN WORKFLOW
 
@@ -56,21 +58,22 @@ workflow assembly {
     }
 
     pre     = pre_process(kraken_db_ch)
-    asm     = assembly_process(pre.prune_ch, pre.fastqc_ch_original, pre.fastq_ch_after)
-    amr     = amr_process(asm.accurance_fasta_ch, asm.prune_ch)
-    post    = post_process(asm.busco_ch, asm.quast_ch)
+    asm     = assembly_process(pre.pruned_reads, pre.trimmed_reads)
+    amr     = amr_process(asm.polished_fasta, pre.pruned_reads)
 
     version_channels = [
     pre.versions,
     asm.versions,
     amr.versions,
-    post.versions
     ]
 
     if (params.mrsa) {
-        mrsa    = mrsa_process(asm.accurance_fasta_ch)
+        mrsa    = mrsa_process(asm.polished_fasta)
         version_channels << mrsa.versions
     }
+    
+    collect(version_channels, amr.mlst_channel, amr.abricate_channel)
+
 }
 
 //PREPROCESSING
@@ -81,154 +84,197 @@ workflow pre_process {
 
     main:
     // Input reads
-    read_ch = Channel.fromFilePairs(params.input, size: 2)
+    reads = Channel.fromFilePairs(params.input, size: 2, checkIfExists: true)
 
-    fastqc_before= FASTQC_QUALITY_ORIGINAL(read_ch.map{it -> it[1]})
+    fastqc_before= FASTQC_PRE(reads.map{it -> it[1]})
 
     // Trimming process
-    trimmed_reads = TRIMMING(read_ch).trimmed_reads
+    trimming = TRIMMING(reads)
+    trimmed_reads = trimming.trimmed_reads
 
     //KRAKEN
-    reads_db = fq_gz_reads_ch.combine(kraken_db)
+    reads_db = trimmed_reads.combine(kraken_db)
                 .map { sample_id, reads_pair, db_dir ->
                 def (r1, r2) = reads_pair
                 tuple (sample_id, [r1, r2], db_dir)
     }
 
-    kraken = KRAKEN (reads_db)
+    kraken = KRAKEN(reads_db)
 
-    //Final Quality control after trimming
-    fastqc_after = FASTQC_QUALITY_FINAL(trimmed_reads.map{it -> it[1]})
+    //Final QC
+    fastqc_after = FASTQC_POST(trimmed_reads.map{it -> it[1]})
+
+    //MULTIQC
+    multiqc = MULTIQC(fastqc_before.qc_zip.collect(), fastqc_after.qc_zip.collect())
 
     //PRUNNING
-    prunning_input = trimmed_reads
-        .join(kraken_ch.keep_ids)
+    pruning_input = trimmed_reads
+        .join(kraken.keep_ids)
         .map {sample_id,reads_pair, keep_ids ->
             def (r1, r2) = reads_pair
             tuple (sample_id, [r1, r2], keep_ids)
         }
     
-    prune = SEQTK_PRUNE(prunning_input)
+    pruning  = SEQTK_PRUNE(pruning_input)
     
     emit:
-    pruned_reads = prune
+    pruned_reads = pruning.pruned_reads
     trimmed_reads = trimmed_reads
-    fastqc_before = fastqc_before
-    fastqc_after = fastqc_after
+
+    versions = fastqc_before.versions
+        .mix(fastqc_after.versions)
+        .mix(trimming.versions)
+        .mix(kraken.versions)
+        .mix(pruning.versions)
+        .mix(multiqc.versions)
 }
 
 workflow assembly_process {
     take:
+    pruned_reads
+    trimmed_reads
 
     main:
     //de novo assembly
-    assembly_denovo_ch = ASSEMBLY(prune_ch)
-    contigs_ch = assembly_denovo_ch.contigs
-    scaffolds_ch = assembly_denovo_ch.scaffolds
+    assembly = ASSEMBLY(pruned_reads)
+    assembly_fasta = assembly.scaffolds
     
     //Filter seq low quality contigs
-    filtered_contigs_ch = FILTER_CONTIGS(contigs_ch)
+    filtered_assembly = FILTER(assembly_fasta).assembly
  
     //Polishing Illumina SEQ
-    polish_data_ch = filtered_contigs_ch
-        .join(trimmed_reads.trimmed_reads)
-        .map { sample_id, contigs, reads_clean_pair -> 
-        def (r1, r2) = reads_clean_pair
-        tuple (sample_id, contigs , [r1, r2])
-    }
+    polishing_input = filtered_assembly
+        .join(trimmed_reads)
 
-    polishing_illumina_ch = ALIGMENT_PILON(polish_data_ch)
+    alignment = ALIGNMENT_PILON(polishing_input)
     
-    polish_data_index_ch = filtered_contigs_ch
-        .join(polishing_illumina_ch.aln_bam)
-        .map { sample_id, contigs, index_bam -> 
-        tuple (sample_id, contigs , index_bam)
-    }
+    pilon_input = filtered_assembly
+        .join(alignment.aln_bam)
 
-    pilon_polish_ch = PILON_POLISH(polish_data_index_ch)
-    accurance_fasta_ch = pilon_polish_ch.pilon_fa
-    
-    //PROKKA
-    prokka_ch = PROKKA(accurance_fasta_ch)
-    
+    pilon = PILON_POLISH(pilon_input)
 
+    polished_fasta = pilon.pilon_fa
+    
     //BAKTA
-    bakta_annotation_ch = BAKTA(accurance_fasta_ch)
+    bakta = BAKTA(polished_fasta)
 
-    //BUSCO
-    busco_ch = BUSCO(accurance_fasta_ch)
+    //QC
+    busco = BUSCO(polished_fasta)
 
-    //QUAST
+    quast_input = polished_fasta.join(trimmed_reads)
+    quast = QUAST(quast_input)
 
-    quast_input_ch = accurance_fasta_ch.join(trimmed_reads.trimmed_reads)
-        .map { sample_id, contigs, reads_clean_pair ->
-        def (r1, r2) = reads_clean_pair
-        tuple (sample_id, contigs, [r1, r2])
-    }
+    mosdepth_input = alignment.aln_bam
+        .join(alignment.aln_bai)
+    mosdepth = MOSDEPTH(mosdepth_input)
 
-    quast_ch = QUAST(quast_input_ch)
+    multiqc_input = busco.results.map{ it[1] }
+        .mix(quast.results.map{ it[1] })
+        .mix(mosdepth.summary.map{ it[1] })
+        .mix(mosdepth.dist.map{ it[1] })
+        .collect()
 
-    //MULTIQC
-    multiqc_ch = MULTIQC(fastqc_before.qc_zip.collect(), fastq_ch_after.qc_zip.collect())
+    genome_multiqc = GENOME_MULTIQC(multiqc_input)
 
     emit:
-    accurance_fasta_ch
-    prune_ch
-    busco_ch
-    quast_ch
+    polished_fasta = polished_fasta
+    versions = assembly.versions
+        .mix(alignment.versions)
+        .mix(pilon.versions)
+        .mix(bakta.versions)
+        .mix(busco.versions)
+        .mix(quast.versions)
+        .mix(mosdepth.versions)
 }
 
 workflow amr_process {
     take:
-    accurance_fasta_ch
-    prune_ch
-    
-    
+    polished_fasta
+    pruned_reads
+            
     main:
-   //AMR
-    //AMR1-ABRIcate
-    abricate_ch = POST_ANALYSIS_ABRICATE(accurance_fasta_ch, params.organism)
-    
-    //AMR2-RESFINDER
-    resfinder_ch = POST_ANALYSIS_AMRFINDER(accurance_fasta_ch)
-   
-    //MLST FAST RAW DATA- ARIBA
 
-    def organism_schemes_ch = Channel.fromPath('organisms_list.txt')
+    mlst = MLST(polished_fasta)
+
+    organism_schemes = Channel.fromPath('organisms_list.txt')
         .splitText()
         .map { line -> line.trim() }
         .filter { it.startsWith(params.organism) }
         .map { scheme -> tuple(params.organism, scheme) }
         .unique()
 
-    def combined_ch = prune_ch.combine(organism_schemes_ch)
+    ariba_input = pruned_reads
+        .combine(organism_schemes)
 
-    ariba_ch = ARIBA(combined_ch)
-    
-    //MLST
-    MLST(accurance_fasta_ch)
+    ariba = ARIBA(ariba_input)
+
+    mlst_organism = mlst.tab
+            .map { sample_id, tab_file ->
+                def line = tab_file.text.trim()
+                def parts = line.tokenize() // splits by spaces/tabs
+                def organism = parts.size() > 1 ? parts[1] : "default"
+                return tuple(sample_id, organism)
+            }
+        
+    abricate_input = polished_fasta.join(mlst_organism, by: 0)
+
+    abricate = ABRICATE(abricate_input)
+    amrfinder = AMRFINDER(polished_fasta)
+
+    emit:
+    mlst_channel = mlst.tab.map { sample_id, file -> file }
+    abricate_channel = abricate.abricate_report
+
+    versions = mlst.versions
+        .mix(ariba.versions)
+        .mix(amrfinder.versions)
+        .mix(abricate.versions)
+
 }
  
-workflow post_process {
-
-    take:
-    busco_ch
-    quast_ch
-
-    main:
-    multiqc_2_ch = POST_MULTIQC(quast_ch.map{ it -> it[1] }.collect(), busco_ch.map{ it -> it[1] }.collect())
-
-}
-
 workflow mrsa_process {
     take:
-    accurance_fasta_ch
+    polished_fasta
 
     main:
     
-    //MRSA
+    mrsa = MRSA (polished_fasta)
+    sccmec = SCCMEC(polished_fasta)
 
-    mrsa_ch = MRSA (accurance_fasta_ch)
-    sccmec_ch = SCCMEC(accurance_fasta_ch)
+    emit:
+    versions = mrsa.versions
+        .mix(sccmec.versions)
 
+}
+
+workflow collect {
+
+    take:
+    version_channels
+    mlst_channel
+    abricate_channel
+
+    main:
+
+    all_versions = Channel.empty()
+
+    version_channels.each { ch ->
+        all_versions = all_versions.mix(ch)
+    }
+    
+    unique_versions = all_versions
+        .unique { it.name }
+        .toSortedList { a, b -> a.name <=> b.name }
+
+    sorted_mlst = mlst_channel
+        .toSortedList { a, b -> a.name <=> b.name }
+
+    sorted_abricate = abricate_channel
+        .toSortedList { a, b -> a.name <=> b.name }
+
+    COLLECT(
+        unique_versions,
+        sorted_mlst,
+        sorted_abricate
+    )
 }
