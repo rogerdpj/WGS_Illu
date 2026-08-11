@@ -16,22 +16,35 @@ process FILTER {
   script:
   
   """
-  echo "seqtk\t\$(seqtk 2>&1 | grep -oE '[0-9]+\\.[0-9]+(-[a-zA-Z0-9]+)?' | head -n 1)" > ${task.process}.version.txt
+  echo "seqtk\t\$(seqtkit 2>&1 | grep -oE '[0-9]+\\.[0-9]+(-[a-zA-Z0-9]+)?' | head -n 1)" > ${task.process}.version.txt
 
   pre_counts=\$(grep -c '^>' ${assembly_fasta})
-  pre_bases=\$(grep -v '^>' ${assembly_fasta} | tr -d '\\n' | wc -c)
+  pre_bases=\$(seqkit stats -T ${assembly_fasta} | awk 'NR==2 {print \$5}')
   
-  seqtk seq \
-    -A \
-    -L ${params.min_assembly_length} \
-    ${assembly_fasta} \
-    > ${sample_id}.filtered.fasta
-  
+  grep '^>' ${assembly_fasta} | awk -v min_cov="${params.min_assembly_coverage}" '
+  {
+      for (i=1; i<=NF; i++) {
+          if (\$i ~ /cov_/) {
+              split(\$i, a, "cov_");
+              split(a[2], b, "_");
+              if (b[1] + 0 >= min_cov + 0) {
+                  sub(/^>/, "", \$1);
+                  print \$1;
+              }
+          }
+      }
+  }' > valid_cov_ids.txt
+
+  seqkit grep -f valid_cov_ids.txt ${assembly_fasta} | \
+  seqkit seq -m ${params.min_assembly_length} > ${sample_id}.filtered.fasta
+
   post_counts=\$(grep -c '^>' ${sample_id}.filtered.fasta)
-  post_bases=\$(grep -v '^>' ${sample_id}.filtered.fasta | tr -d '\\n' | wc -c)
-  
+  post_bases=\$(seqkit stats -T ${sample_id}.filtered.fasta | awk 'NR==2 {print \$5}')
+
   cat << EOF > filter_stats_${sample_id}.txt
   Sample: ${sample_id}
+  Min Length Cutoff  : ${params.min_assembly_length} bp
+  Min Coverage Cutoff: ${params.min_assembly_coverage}x
   Sequences before : \$pre_counts
   Bases before   : \$pre_bases
   Sequences after  : \$post_counts

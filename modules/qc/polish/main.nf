@@ -10,7 +10,7 @@ process ALIGNMENT_PILON {
 
   output:
   tuple val(sample_id), path("${sample_id}.bwa.aln.sorted.bam"), emit: aln_bam
-  path("${sample_id}.bwa.aln.sorted.bam.bai"), emit: aln_bai
+  tuple val(sample_id), path("${sample_id}.bwa.aln.sorted.bam.bai"), emit: aln_bai
   path("${sample_id}.bwa.aln.sorted.bam.stats.txt"), emit: aln_stats
   path "${task.process}.version.txt", emit: versions
 

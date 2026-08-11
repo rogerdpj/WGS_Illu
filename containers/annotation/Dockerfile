@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Create environment
 RUN micromamba create -n bakta_env -y \
     -c bioconda -c conda-forge \
-    bakta=1.12.0 \
+    bakta=1.12.1 \
     wget \
     xz \
     && micromamba clean --all --yes
